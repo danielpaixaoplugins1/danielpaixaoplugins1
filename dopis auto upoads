@@ -1,0 +1,209 @@
+<?php
+/*
+Plugin Name: DOP Auto Uploadis
+Description: Automatically uploads and attaches external images in posts to the WordPress media library, updates old post images within a date range, and sets featured images.
+Version: 2.5
+Author: Daniel Oliveira da Paixao
+Text Domain: dop-auto-uploadis
+Domain Path: /languages
+*/
+
+if (!class_exists('DOPAutoUploadis')) {
+  class DOPAutoUploadis
+  {
+    const WP_OPTIONS_KEY = 'dop_auto_uploadis_settings';
+
+    public function __construct() {
+      add_action('plugins_loaded', array($this, 'initTextdomain'));
+      add_action('admin_menu', array($this, 'addAdminMenu'));
+      add_filter('wp_insert_post_data', array($this, 'savePost'), 10, 2);
+      add_action('admin_enqueue_scripts', array($this, 'enqueueDatepicker'));
+      add_action('admin_init', array($this, 'registerSettings'));
+    }
+
+    public function run() {
+      // Adicione um gancho de ação personalizado para adições futuras
+      do_action('dop_auto_uploadis_loaded');
+    }
+
+    public function initTextdomain() {
+      load_plugin_textdomain('dop-auto-uploadis', false, dirname(plugin_basename(__FILE__)) . '/languages');
+    }
+
+    public function enqueueDatepicker() {
+      wp_enqueue_script('jquery-ui-datepicker');
+      wp_enqueue_style('jquery-ui-css', 'https://ajax.googleapis.com/ajax/libs/jqueryui/1.12.1/themes/smoothness/jquery-ui.css');
+    }
+
+    public function addAdminMenu() {
+      add_options_page(
+        __('DOP Auto Uploadis Settings', 'dop-auto-uploadis'),
+        __('DOP Auto Uploadis', 'dop-auto-uploadis'),
+        'manage_options',
+        'dop-auto-uploadis',
+        array($this, 'settingPage')
+      );
+    }
+
+    public function registerSettings() {
+      register_setting(self::WP_OPTIONS_KEY, self::WP_OPTIONS_KEY . '_set_featured_image', 'intval');
+    }
+
+    public function settingPage() {
+      // Formulário para especificar o intervalo de datas e opção de imagem em destaque
+      ?>
+      <div class="wrap">
+        <h2><?php _e('DOP Auto Uploadis Settings', 'dop-auto-uploadis'); ?></h2>
+        <form method="post" action="">
+          <?php settings_fields(self::WP_OPTIONS_KEY); ?>
+          <table class="form-table">
+            <tr>
+              <th scope="row">
+                <label for="start_date"><?php _e('Start Date', 'dop-auto-uploadis'); ?></label>
+              </th>
+              <td>
+                <input type="text" id="start_date" name="start_date" class="datepicker" />
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">
+                <label for="end_date"><?php _e('End Date', 'dop-auto-uploadis'); ?></label>
+              </th>
+              <td>
+                <input type="text" id="end_date" name="end_date" class="datepicker" />
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">
+                <label for="set_featured_image"><?php _e('Set Featured Image', 'dop-auto-uploadis'); ?></label>
+              </th>
+              <td>
+                <input type="checkbox" id="set_featured_image" name="<?php echo self::WP_OPTIONS_KEY . '_set_featured_image'; ?>" value="1" <?php checked(get_option(self::WP_OPTIONS_KEY . '_set_featured_image'), 1); ?> />
+              </td>
+            </tr>
+          </table>
+          <p class="submit">
+            <input type="submit" name="update_images" class="button-primary" value="<?php _e('Update Images', 'dop-auto-uploadis'); ?>" />
+          </p>
+        </form>
+      </div>
+      <?php
+
+      // Lidar com a submissão do formulário para o intervalo de datas e atualizar imagens
+      if (isset($_POST['update_images'])) {
+        $this->updateOldPostsImages($_POST['start_date'], $_POST['end_date']);
+      }
+    }
+
+    public function savePost($data, $postarr) {
+      if ('post' === $data['post_type']) { // Apenas processe para postagens
+        $content = $data['post_content'];
+        $images = $this->extractImagesFromContent($content);
+
+        foreach ($images as $imageUrl) {
+          $attachmentId = $this->uploadImage($imageUrl);
+
+          if ($attachmentId) {
+            $updatedContent = str_replace($imageUrl, wp_get_attachment_url($attachmentId), $content);
+            $data['post_content'] = $updatedContent;
+
+            // Define a imagem em destaque se habilitada
+            if (get_option(self::WP_OPTIONS_KEY . '_set_featured_image')) {
+              $this->setFeaturedImage($data['ID'], $attachmentId);
+            }
+          }
+        }
+      }
+
+      return $data;
+    }
+
+    private function extractImagesFromContent($content) {
+      // Utilize o PHP Simple HTML DOM Parser para analisar o conteúdo HTML da postagem
+      require_once(ABSPATH . 'wp-includes/SimplePie/HTML/Parser.php');
+      $parser = new SimplePie_HTML_Parser();
+      $dom = $parser->parse($content);
+
+      $images = array();
+
+      foreach ($dom->find('img') as $img) {
+        $src = $img->getAttribute('src');
+        if ($src) {
+          $images[] = $src;
+        }
+      }
+
+      return $images;
+    }
+
+    private function uploadImage($imageUrl) {
+      $post_id = null; // Defina o ID da postagem se necessário
+
+      $media = media_sideload_image($imageUrl, $post_id);
+
+      if (!is_wp_error($media)) {
+        return $media; // Retorna o ID do anexo
+      } else {
+        // Lidar com erro
+        error_log('Falha ao carregar a imagem: ' . $media->get_error_message());
+        return false;
+      }
+    }
+
+    private function setFeaturedImage($post_id, $attachmentId) {
+      // Certifique-se de que o anexo (imagem) é uma imagem válida
+      if (wp_attachment_is_image($attachmentId)) {
+        // Define o anexo como a imagem em destaque da postagem
+        set_post_thumbnail($post_id, $attachmentId);
+      }
+    }
+
+    private function updateOldPostsImages($startDate, $endDate) {
+      $args = array(
+        'date_query' => array(
+          array(
+            'after' => $startDate,
+            'before' => $endDate,
+          ),
+        ),
+        'posts_per_page' => -1,
+        'post_type' => 'post',
+        'post_status' => 'publish',
+      );
+
+      $query = new WP_Query($args);
+
+      if ($query->have_posts()) {
+        while ($query->have_posts()) {
+          $query->the_post();
+          $content = get_the_content();
+          $images = $this->extractImagesFromContent($content);
+
+          foreach ($images as $imageUrl) {
+            $attachmentId = $this->uploadImage($imageUrl);
+
+            if ($attachmentId) {
+              $updatedContent = str_replace($imageUrl, wp_get_attachment_url($attachmentId), $content);
+              $post_data = array(
+                'ID' => get_the_ID(),
+                'post_content' => $updatedContent,
+              );
+
+              wp_update_post($post_data);
+
+              // Define a imagem em destaque se habilitada
+              if (get_option(self::WP_OPTIONS_KEY . '_set_featured_image')) {
+                $this->setFeaturedImage(get_the_ID(), $attachmentId);
+              }
+            }
+          }
+        }
+
+        wp_reset_postdata();
+      }
+    }
+  }
+}
+
+$dop_auto_uploadis = new DOPAutoUploadis();
+$dop_auto_uploadis->run();
